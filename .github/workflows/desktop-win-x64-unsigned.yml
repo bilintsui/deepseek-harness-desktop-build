@@ -1,0 +1,174 @@
+# Build the Windows x64 DeepSeek Harness desktop installer from the upstream
+# repository pinned as the `dsh` submodule.
+#
+# This repository is CI only and holds no dsh source. The revision that gets
+# packaged is the pinned submodule commit; pass `dsh_ref` to build any upstream
+# branch, tag or SHA instead.
+#
+# Signed Windows packaging drives a SafeNet USB token through SignTool
+# (apps/desktop/scripts/windows-sign.cmd), which a hosted runner cannot provide,
+# so this uses the documented unsigned path and produces a local-testing
+# artifact: no certificate, no token, no update origin.
+name: Desktop Windows x64 (unsigned)
+
+on:
+  # Every push to master builds the pinned submodule commit, so advancing the
+  # packaged dsh revision is `git submodule update --remote dsh` plus a push.
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dsh_ref:
+        description: Upstream dsh ref (branch, tag or SHA) to build instead of the pinned submodule commit
+        required: false
+        default: ''
+      app_id:
+        description: Reverse-DNS application id baked into the installer
+        required: false
+        default: com.deepseek.harness
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.dsh_ref || 'pinned' }}
+  cancel-in-progress: false
+
+env:
+  # CI runs must never report to the production telemetry endpoint.
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  package:
+    name: package win-x64 unsigned
+    runs-on: windows-latest
+    # The full monorepo build plus runtime preparation plus NSIS packaging is
+    # long; hosted Windows runners are 4 vCPU.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Optional override: build an upstream ref instead of the pinned commit.
+      - name: Select dsh revision
+        if: inputs.dsh_ref != ''
+        shell: bash
+        working-directory: dsh
+        run: |
+          git fetch --depth 1 origin "${{ inputs.dsh_ref }}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Report dsh revision
+        shell: bash
+        working-directory: dsh
+        run: |
+          echo "dsh revision: $(git rev-parse HEAD)"
+          echo "dsh version:  $(grep -m1 '"version"' package.json)"
+
+      # The desktop build creates directory symlinks; Windows needs Developer
+      # Mode for non-elevated symlink creation. Hosted runners are administrators.
+      - name: Enable Developer Mode (symlink support)
+        shell: pwsh
+        run: >-
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
+          /t REG_DWORD /f /v "AllowDevelopmentWithoutDevLicense" /d "1"
+
+      # Hosted images keep a small C: and a large D: (GITHUB_WORKSPACE lives on
+      # D:). Route temp and the pnpm store there: it keeps C: from filling up
+      # and lets pnpm hard-link from the store instead of copying across volumes.
+      - name: Route scratch space to the workspace volume
+        shell: pwsh
+        run: |
+          $drive = (Split-Path -Qualifier $env:GITHUB_WORKSPACE).TrimEnd(':')
+          $scratch = "${drive}:\dsh-build"
+          New-Item -ItemType Directory -Force -Path "$scratch\temp", "$scratch\store" | Out-Null
+          @(
+            "TEMP=$scratch\temp"
+            "TMP=$scratch\temp"
+            "PNPM_CONFIG_STORE_DIR=$scratch\store"
+          ) | Add-Content -Path $env:GITHUB_ENV
+          Write-Output "scratch=$scratch"
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } } | Format-Table
+
+      # Read the pinned pnpm version from the submodule so this repository never
+      # carries its own copy of the upstream pin.
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: dsh/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: dsh/pnpm-lock.yaml
+
+      # Every packaging command reads this file before anything else, including
+      # --unsigned, --dir and --prepare-only; there is no fallback to ambient
+      # environment variables. Only the app id and the selected deployment's
+      # mandatory-update origin are required, and the origin is never contacted
+      # during packaging.
+      - name: Write dsh/apps/desktop/.env.windows
+        shell: pwsh
+        run: |
+          @(
+            "DSH_DESKTOP_APP_ID=${{ inputs.app_id || 'com.deepseek.harness' }}"
+            "DSH_DESKTOP_AUTO_UPDATE_ENV=test"
+            "DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com"
+            "DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com"
+          ) | Set-Content -Path dsh/apps/desktop/.env.windows -Encoding utf8
+          Get-Content dsh/apps/desktop/.env.windows
+
+      - name: Install dependencies
+        working-directory: dsh
+        run: pnpm install --frozen-lockfile
+
+      # `check:package` always validates the signed configuration, so call the
+      # script directly with --unsigned --check to fail fast on a bad dotenv
+      # before the long build starts.
+      - name: Validate packaging configuration
+        working-directory: dsh
+        run: pnpm exec tsx apps/desktop/scripts/package-target.ts win-x64 --unsigned --check
+
+      - name: Package Windows x64 (unsigned)
+        working-directory: dsh
+        run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: List artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          $artifacts = 'dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts'
+          if (Test-Path $artifacts) {
+            Get-ChildItem $artifacts |
+              Select-Object Name, @{ n = 'SizeMB'; e = { [math]::Round($_.Length / 1MB, 1) } } | Format-Table
+          } else {
+            Write-Output "no artifact directory at $artifacts"
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-desktop-win-x64-unsigned
+          # Only the installer and its blockmap. The same directory also holds
+          # electron-builder's win-unpacked tree, the .icon-ico and
+          # .nsis-directory-installer scratch directories and builder-debug.yml,
+          # which together outweigh the installer itself.
+          path: |
+            dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*.exe
+            dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*.exe.blockmap
+          if-no-files-found: error
+          retention-days: 14
+
+      # Stage-by-stage logs; written for every supervised packaging run and the
+      # thing to read when the build fails late. Credentials are never recorded.
+      - name: Upload packaging logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-desktop-win-x64-packaging-logs
+          path: dsh/apps/desktop/.desktop-build/packaging-runs/**
+          if-no-files-found: ignore
+          retention-days: 14
