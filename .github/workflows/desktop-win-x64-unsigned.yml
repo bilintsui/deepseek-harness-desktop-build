@@ -107,17 +107,19 @@ jobs:
 
       # Every packaging command reads this file before anything else, including
       # --unsigned, --dir and --prepare-only; there is no fallback to ambient
-      # environment variables. Only the app id and the selected deployment's
-      # mandatory-update origin are required, and the origin is never contacted
-      # during packaging.
+      # environment variables. Required for the test deployment: the app id, the
+      # mandatory-update origin, and (since 0.1.7) a non-empty allowedAuthOrigins
+      # list inside DSH_DESKTOP_MANDATORY_UPDATE_CONFIG. None of these origins is
+      # contacted during packaging.
       - name: Write dsh/apps/desktop/.env.windows
         shell: pwsh
         run: |
           @(
             "DSH_DESKTOP_APP_ID=${{ inputs.app_id || 'com.deepseek.harness' }}"
-            "DSH_DESKTOP_AUTO_UPDATE_ENV=test"
-            "DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com"
-            "DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com"
+            'DSH_DESKTOP_AUTO_UPDATE_ENV=test'
+            'DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com'
+            'DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com'
+            'DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://harness-test.deepseek.com"]}'
           ) | Set-Content -Path dsh/apps/desktop/.env.windows -Encoding utf8
           Get-Content dsh/apps/desktop/.env.windows
 
