@@ -68,6 +68,27 @@ jobs:
           echo "dsh revision: $(git rev-parse HEAD)"
           echo "dsh version:  $(grep -m1 '"version"' package.json)"
 
+      # The packaged-runtime smoke test imports extension modules from inside
+      # win-unpacked. Under this runner layout (D:\a\<repo>\<repo>\dsh\...) the
+      # longest member of the packaged Python tree reaches 310 characters, and
+      # Windows refuses the load with "The filename or extension is too long".
+      # LongPathsEnabled is already 1 on the image, but that only helps
+      # long-path-aware processes and the bundled python.exe is not one: DLL
+      # loading goes through LoadLibraryExW. Build from a short root instead, so
+      # every derived path stays under MAX_PATH. A real directory is required —
+      # the packaging code rejects linked paths (realpath(x) !== resolve(x)).
+      - name: Relocate the build to a short root
+        shell: pwsh
+        run: |
+          $target = 'D:\b'
+          if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          robocopy $env:GITHUB_WORKSPACE $target /MIR /NFL /NDL /NJH /NJS /NP /MT:16
+          if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
+          Write-Output "relocated to $target"
+          Write-Output "root revision: $(git -C D:\b rev-parse HEAD)"
+          Write-Output "dsh revision:  $(git -C D:\b\dsh rev-parse HEAD)"
+
       # The desktop build creates directory symlinks; Windows needs Developer
       # Mode for non-elevated symlink creation. Hosted runners are administrators.
       - name: Enable Developer Mode (symlink support)
@@ -140,29 +161,35 @@ jobs:
             'DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com'
             'DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com'
             'DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://harness-test.deepseek.com"]}'
-          ) | Set-Content -Path dsh/apps/desktop/.env.windows -Encoding utf8
-          Get-Content dsh/apps/desktop/.env.windows
+          ) | Set-Content -Path D:\b\dsh\apps\desktop\.env.windows -Encoding utf8
+          Get-Content D:\b\dsh\apps\desktop\.env.windows
 
       - name: Install dependencies
-        working-directory: dsh
-        run: pnpm install --frozen-lockfile
+        shell: pwsh
+        run: |
+          Set-Location D:\b\dsh
+          pnpm install --frozen-lockfile
 
       # `check:package` always validates the signed configuration, so call the
       # script directly with --unsigned --check to fail fast on a bad dotenv
       # before the long build starts.
       - name: Validate packaging configuration
-        working-directory: dsh
-        run: pnpm exec tsx apps/desktop/scripts/package-target.ts win-x64 --unsigned --check
+        shell: pwsh
+        run: |
+          Set-Location D:\b\dsh
+          pnpm exec tsx apps/desktop/scripts/package-target.ts win-x64 --unsigned --check
 
       - name: Package Windows x64 (unsigned)
-        working-directory: dsh
-        run: pnpm run package:desktop:win:x64:unsigned
+        shell: pwsh
+        run: |
+          Set-Location D:\b\dsh
+          pnpm run package:desktop:win:x64:unsigned
 
       - name: List artifacts
         if: always()
         shell: pwsh
         run: |
-          $artifacts = 'dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts'
+          $artifacts = 'D:\b\dsh\apps\desktop\.desktop-build\targets\win-x64\unsigned-artifacts'
           if (Test-Path $artifacts) {
             Get-ChildItem $artifacts |
               Select-Object Name, @{ n = 'SizeMB'; e = { [math]::Round($_.Length / 1MB, 1) } } | Format-Table
@@ -190,8 +217,8 @@ jobs:
           # .nsis-directory-installer scratch directories and builder-debug.yml,
           # which together outweigh the installer itself.
           path: |
-            dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*.exe
-            dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*.exe.blockmap
+            D:/b/dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*.exe
+            D:/b/dsh/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*.exe.blockmap
           if-no-files-found: error
           retention-days: 14
 
@@ -202,6 +229,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dsh-desktop-win-x64-packaging-logs
-          path: dsh/apps/desktop/.desktop-build/packaging-runs/**
+          path: D:/b/dsh/apps/desktop/.desktop-build/packaging-runs/**
           if-no-files-found: ignore
           retention-days: 14
