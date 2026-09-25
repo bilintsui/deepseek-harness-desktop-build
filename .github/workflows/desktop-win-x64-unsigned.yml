@@ -97,26 +97,6 @@ jobs:
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
           /t REG_DWORD /f /v "AllowDevelopmentWithoutDevLicense" /d "1"
 
-      # The packaged-runtime smoke test imports lxml (through python-docx) from
-      # inside win-unpacked, whose absolute path lands at the MAX_PATH boundary
-      # under this runner layout: D:\a\<repo>\<repo>\dsh\apps\desktop\.desktop-build\
-      # targets\win-x64\unsigned-artifacts\win-unpacked\resources\runtime\
-      # primary-runtime\dependencies\python\Lib\site-packages\lxml\...
-      # Windows rejects that DLL load with "The filename or extension is too
-      # long" unless long paths are enabled. The registry value is read by each
-      # new process, so setting it before anything spawns is enough, and CPython
-      # applies the \\?\ prefix once it is on.
-      - name: Enable Windows long paths
-        shell: pwsh
-        run: |
-          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
-          $before = (Get-ItemProperty -Path $key -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled
-          Write-Output "LongPathsEnabled before: $before"
-          Set-ItemProperty -Path $key -Name LongPathsEnabled -Value 1 -Type DWord
-          Write-Output "LongPathsEnabled after:  $((Get-ItemProperty -Path $key -Name LongPathsEnabled).LongPathsEnabled)"
-          git config --system core.longpaths true
-          Write-Output "git core.longpaths: $(git config --system --get core.longpaths)"
-
       # Hosted images keep a small C: and a large D: (GITHUB_WORKSPACE lives on
       # D:). Route temp and the pnpm store there: it keeps C: from filling up
       # and lets pnpm hard-link from the store instead of copying across volumes.
